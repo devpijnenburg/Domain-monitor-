@@ -2,69 +2,57 @@
 
 Self-hosted domain monitoring tool vergelijkbaar met [internet.nl](https://internet.nl). Controleert TLS, DNSSEC, SPF, DKIM, DMARC, HSTS, IPv6 en meer. Alerteert via e-mail en/of Telegram bij verslechtering van scores.
 
+## Installatie
+
+Voer het installatiescript uit op een Ubuntu 22.04 / Debian 12 host (LXC, VM of bare metal):
+
+```bash
+git clone https://github.com/devpijnenburg/Domain-monitor-.git
+cd Domain-monitor-
+sudo bash install.sh
+```
+
+Het script:
+- Installeert Docker automatisch indien afwezig
+- Vraagt om SMTP en/of Telegram configuratie
+- Start de internet.nl Dashboard stack via Docker Compose
+- Stelt een dagelijkse cron in voor degradation-alerts
+
+## Na installatie
+
+**Dashboard openen:**
+```
+http://<host-ip>:8000
+```
+
+**Admin account aanmaken:**
+```bash
+cd /opt/domain-monitor/app
+docker compose exec web python manage.py createsuperuser
+```
+
+**Domeinen toevoegen:**
+Bewerk `/opt/domain-monitor/config/domains.txt` (één domein per regel).
+
+**Alert handmatig testen:**
+```bash
+python3 /opt/domain-monitor/alert/alert.py
+```
+
+## Configuratie
+
+Na installatie staat de configuratie in `/opt/domain-monitor/app/.env`. Bewerk dit bestand om SMTP of Telegram aan/uit te zetten.
+
 ## Stack
 
 - **internet.nl Dashboard** — officiële open-source implementatie van internet.nl checks
 - **PostgreSQL + Redis + Celery** — database, cache, taakwachtrij
-- **Proxmox LXC** (Ubuntu 22.04, 4 vCPU, 4 GB RAM, 40 GB disk)
-- **GitHub Actions** — CI/CD pipeline voor deployment
+- **alert.py** — vergelijkt scores dagelijks, alerteert bij verslechtering ≥ 5% of falende kritieke check
 
-## GitHub Secrets instellen
+## Updates
 
-Voeg de volgende secrets toe in je GitHub repository (Settings → Secrets and variables → Actions):
-
-| Secret               | Beschrijving                                        |
-|----------------------|-----------------------------------------------------|
-| `PROXMOX_HOST`       | IP-adres of hostname van je Proxmox server          |
-| `PROXMOX_SSH_KEY`    | Private SSH key voor `root@PROXMOX_HOST`            |
-| `LXC_VMID`           | Container ID (bijv. `200`)                          |
-| `SMTP_HOST`          | SMTP-server (bijv. `smtp.gmail.com`)                |
-| `SMTP_PORT`          | SMTP-poort (bijv. `587`)                            |
-| `SMTP_USER`          | SMTP-gebruikersnaam                                 |
-| `SMTP_PASSWORD`      | SMTP-wachtwoord                                     |
-| `ALERT_EMAIL_TO`     | E-mailadres voor alerts                             |
-| `TELEGRAM_BOT_TOKEN` | Token van Telegram bot (optioneel)                  |
-| `TELEGRAM_CHAT_ID`   | Chat-ID voor Telegram berichten (optioneel)         |
-| `DOMAINS`            | Te monitoren domeinen, één per regel (optioneel — overschrijft `config/domains.txt`) |
-
-> SMTP en Telegram zijn beide optioneel. Als de secrets leeg zijn, wordt dat kanaal overgeslagen.
-
-## SSH-toegang instellen
-
-Zorg dat de publieke sleutel die bij `PROXMOX_SSH_KEY` hoort in `/root/.ssh/authorized_keys` staat op de Proxmox host.
-
-## Domeinen configureren
-
-**Aanbevolen**: Sla domeinen op als GitHub Secret `DOMAINS` (één per regel):
-```
-mijndomein.nl
-ander-domein.nl
-```
-De pipeline schrijft de secret-waarde naar `domains.txt` in de LXC. Zo staan domeinen niet in de repository.
-
-**Alternatief**: Bewerk `config/domains.txt` direct in de repository. Deze wordt gebruikt als de `DOMAINS` secret leeg is.
-
-## Na deployment
-
-1. Open `http://<LXC_IP>:8000` voor het Dashboard
-2. Maak een admin-account aan:
-   ```bash
-   pct exec <LXC_VMID> -- bash -c 'cd /opt/domain-monitor/app && docker compose exec web python manage.py createsuperuser'
-   ```
-3. Log in, voeg je domeinen toe en plan een scan
-
-## Alerting
-
-Het script `alert/alert.py` draait dagelijks om 08:00 via cron. Het:
-- Vergelijkt de laatste scan met de vorige meting
-- Alerteert als totaalscore ≥ 5% daalt
-- Alerteert als een kritieke check (DNSSEC, certificaat, HTTPS) faalt
-
-Handmatig uitvoeren:
 ```bash
-pct exec <LXC_VMID> -- python3 /opt/domain-monitor/alert/alert.py
+cd /pad/naar/domain-monitor-
+git pull
+sudo bash install.sh
 ```
-
-## Opnieuw deployen
-
-Elke push naar `main` triggert een nieuwe deployment. De LXC container wordt **niet** opnieuw aangemaakt als deze al bestaat — alleen de applicatie wordt bijgewerkt.
