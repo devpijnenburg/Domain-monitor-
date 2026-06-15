@@ -7,9 +7,7 @@ Self-hosted domain monitoring tool vergelijkbaar met [internet.nl](https://inter
 Voer het installatiescript uit op een Ubuntu 22.04 / Debian 12 host (LXC, VM of bare metal):
 
 ```bash
-git clone https://github.com/devpijnenburg/Domain-monitor-.git
-cd Domain-monitor-
-sudo bash install.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/devpijnenburg/Domain-monitor-/main/install.sh)"
 ```
 
 Het script:
