@@ -1,0 +1,126 @@
+name: Deploy to Proxmox LXC
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy Domain Monitor
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PROXMOX_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.PROXMOX_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Provision LXC container
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          # Upload and run lxc-setup.sh on the Proxmox host
+          scp -i ~/.ssh/id_deploy proxmox/lxc-setup.sh root@$PROXMOX_HOST:/tmp/lxc-setup.sh
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "chmod +x /tmp/lxc-setup.sh && LXC_VMID=$LXC_VMID /tmp/lxc-setup.sh"
+
+      - name: Get LXC IP address
+        id: lxc_ip
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          LXC_IP=$(ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "pct exec $LXC_VMID -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'")
+          echo "ip=$LXC_IP" >> $GITHUB_OUTPUT
+          echo "LXC IP: $LXC_IP"
+
+      - name: Copy application files to LXC
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          # Create target directories in LXC
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "pct exec $LXC_VMID -- mkdir -p /opt/domain-monitor/app /opt/domain-monitor/alert /opt/domain-monitor/config"
+
+          # Copy files via Proxmox host (pct push)
+          for f in app/docker-compose.yml; do
+            ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+              "cat > /tmp/$(basename $f)" < $f
+            ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+              "pct push $LXC_VMID /tmp/$(basename $f) /opt/domain-monitor/$f"
+          done
+
+          for f in alert/alert.py alert/requirements.txt alert/cron.sh; do
+            ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+              "cat > /tmp/$(basename $f)" < $f
+            ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+              "pct push $LXC_VMID /tmp/$(basename $f) /opt/domain-monitor/$f"
+          done
+
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "cat > /tmp/domains.txt" < config/domains.txt
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "pct push $LXC_VMID /tmp/domains.txt /opt/domain-monitor/config/domains.txt"
+
+      - name: Write environment file
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          cat > /tmp/.env << EOF
+          SMTP_HOST=${{ secrets.SMTP_HOST }}
+          SMTP_PORT=${{ secrets.SMTP_PORT }}
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
+          ALERT_EMAIL_TO=${{ secrets.ALERT_EMAIL_TO }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          EOF
+
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "cat > /tmp/.env" < /tmp/.env
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
+            "pct push $LXC_VMID /tmp/.env /opt/domain-monitor/app/.env"
+          rm /tmp/.env
+
+      - name: Deploy Docker Compose stack
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST "pct exec $LXC_VMID -- bash -c '
+            cd /opt/domain-monitor/app
+            docker compose pull --quiet
+            docker compose up -d --remove-orphans
+          '"
+
+      - name: Install alert dependencies and configure cron
+        env:
+          LXC_VMID: ${{ secrets.LXC_VMID }}
+          PROXMOX_HOST: ${{ secrets.PROXMOX_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST "pct exec $LXC_VMID -- bash -c '
+            pip3 install -q -r /opt/domain-monitor/alert/requirements.txt
+            chmod +x /opt/domain-monitor/alert/cron.sh
+
+            # Install cron job (runs daily at 08:00)
+            CRON_LINE=\"0 8 * * * /opt/domain-monitor/alert/cron.sh >> /var/log/domain-monitor-alert.log 2>&1\"
+            (crontab -l 2>/dev/null | grep -v domain-monitor-alert; echo \"$CRON_LINE\") | crontab -
+          '"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **LXC VMID**: ${{ secrets.LXC_VMID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dashboard URL**: http://${{ steps.lxc_ip.outputs.ip }}:8000" >> $GITHUB_STEP_SUMMARY
+          echo "- **Alerts**: SMTP + Telegram (via daily cron)" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,94 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dashboard
+      POSTGRES_USER: dashboard
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme_db_password}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    image: ghcr.io/internetstandards/dashboard:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-changeme_secret_key_min_50_chars_long_replace_this}
+      DB_HOST: db
+      DB_NAME: dashboard
+      DB_USER: dashboard
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_db_password}
+      REDIS_URL: redis://redis:6379/0
+      ALLOWED_HOSTS: "*"
+      DJANGO_SETTINGS_MODULE: dashboard.settings.docker
+    volumes:
+      - app_data:/app/data
+    command: gunicorn dashboard.wsgi:application --bind 0.0.0.0:8000 --workers 2
+
+  worker:
+    image: ghcr.io/internetstandards/dashboard:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-changeme_secret_key_min_50_chars_long_replace_this}
+      DB_HOST: db
+      DB_NAME: dashboard
+      DB_USER: dashboard
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_db_password}
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: dashboard.settings.docker
+    volumes:
+      - app_data:/app/data
+    command: celery -A dashboard worker --loglevel=info --concurrency=2
+
+  scheduler:
+    image: ghcr.io/internetstandards/dashboard:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-changeme_secret_key_min_50_chars_long_replace_this}
+      DB_HOST: db
+      DB_NAME: dashboard
+      DB_USER: dashboard
+      DB_PASSWORD: ${DB_PASSWORD:-changeme_db_password}
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: dashboard.settings.docker
+    volumes:
+      - app_data:/app/data
+    command: celery -A dashboard beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+volumes:
+  db_data:
+  redis_data:
+  app_data:

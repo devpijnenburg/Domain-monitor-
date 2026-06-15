@@ -1,0 +1,4 @@
+# Lijst van te monitoren domeinen — één domein per regel
+# Lege regels en regels die beginnen met # worden genegeerd
+# example.com
+# mijndomein.nl
