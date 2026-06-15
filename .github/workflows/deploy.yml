@@ -66,10 +66,17 @@ jobs:
               "pct push $LXC_VMID /tmp/$(basename $f) /opt/domain-monitor/$f"
           done
 
+          # Write domains from secret (one per line); fall back to config/domains.txt if secret is empty
+          if [ -n "${{ secrets.DOMAINS }}" ]; then
+            printf '%s\n' "${{ secrets.DOMAINS }}" > /tmp/domains.txt
+          else
+            cp config/domains.txt /tmp/domains.txt
+          fi
           ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
-            "cat > /tmp/domains.txt" < config/domains.txt
+            "cat > /tmp/domains.txt" < /tmp/domains.txt
           ssh -i ~/.ssh/id_deploy root@$PROXMOX_HOST \
             "pct push $LXC_VMID /tmp/domains.txt /opt/domain-monitor/config/domains.txt"
+          rm /tmp/domains.txt
 
       - name: Write environment file
         env:

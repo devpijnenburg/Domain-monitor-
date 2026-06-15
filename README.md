@@ -25,6 +25,7 @@ Voeg de volgende secrets toe in je GitHub repository (Settings → Secrets and v
 | `ALERT_EMAIL_TO`     | E-mailadres voor alerts                             |
 | `TELEGRAM_BOT_TOKEN` | Token van Telegram bot (optioneel)                  |
 | `TELEGRAM_CHAT_ID`   | Chat-ID voor Telegram berichten (optioneel)         |
+| `DOMAINS`            | Te monitoren domeinen, één per regel (optioneel — overschrijft `config/domains.txt`) |
 
 > SMTP en Telegram zijn beide optioneel. Als de secrets leeg zijn, wordt dat kanaal overgeslagen.
 
@@ -34,14 +35,14 @@ Zorg dat de publieke sleutel die bij `PROXMOX_SSH_KEY` hoort in `/root/.ssh/auth
 
 ## Domeinen configureren
 
-Bewerk `config/domains.txt` en voeg je domeinen toe (één per regel):
-
+**Aanbevolen**: Sla domeinen op als GitHub Secret `DOMAINS` (één per regel):
 ```
 mijndomein.nl
 ander-domein.nl
 ```
+De pipeline schrijft de secret-waarde naar `domains.txt` in de LXC. Zo staan domeinen niet in de repository.
 
-Commit en push naar `main` — de pipeline rolt automatisch uit.
+**Alternatief**: Bewerk `config/domains.txt` direct in de repository. Deze wordt gebruikt als de `DOMAINS` secret leeg is.
 
 ## Na deployment
 
