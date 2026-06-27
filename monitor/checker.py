@@ -14,6 +14,7 @@ import checkdmarc
 
 DOMAINS_FILE = os.getenv("DOMAINS_FILE", "/data/domains.txt")
 RESULTS_FILE = os.getenv("RESULTS_FILE", "/data/results.json")
+TRIGGER_FILE = "/data/scan.trigger"
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_HOURS", "24")) * 3600
 
 CHECK_WEIGHTS = {
@@ -165,8 +166,21 @@ def run_scan():
     print(f"Resultaten opgeslagen in {RESULTS_FILE}", flush=True)
 
 
+def wait_for_next_scan(seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if Path(TRIGGER_FILE).exists():
+            try:
+                Path(TRIGGER_FILE).unlink()
+            except OSError:
+                pass
+            print("Handmatige scan getriggerd.", flush=True)
+            return
+        time.sleep(10)
+
+
 if __name__ == "__main__":
     while True:
         run_scan()
-        print(f"Volgende scan over {SCAN_INTERVAL // 3600} uur. Sleeping...", flush=True)
-        time.sleep(SCAN_INTERVAL)
+        print(f"Volgende scan over {SCAN_INTERVAL // 3600} uur.", flush=True)
+        wait_for_next_scan(SCAN_INTERVAL)

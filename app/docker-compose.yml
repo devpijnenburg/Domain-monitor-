@@ -24,6 +24,7 @@ services:
       - "3000:3000"
     environment:
       RESULTS_FILE: /data/results.json
+      DOMAINS_FILE: /data/domains.txt
     command: >
       sh -c "pip install --quiet --break-system-packages -r /app/requirements.txt &&
              uvicorn main:app --host 0.0.0.0 --port 3000"
