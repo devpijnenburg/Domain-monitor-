@@ -18,7 +18,12 @@ Het script:
 
 ## Na installatie
 
-**Dashboard openen:**
+**Status overzicht (eigen dashboard):**
+```
+http://<host-ip>:3000
+```
+
+**internet.nl detail dashboard:**
 ```
 http://<host-ip>:8000
 ```

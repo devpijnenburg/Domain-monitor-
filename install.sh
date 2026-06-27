@@ -37,7 +37,7 @@ apt-get install -y -qq python3 python3-pip cron
 systemctl enable --now cron
 
 # ── Mappen ──────────────────────────────────────────────────────────────────
-mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/alert" "$INSTALL_DIR/config"
+mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/alert" "$INSTALL_DIR/config" "$INSTALL_DIR/ui/templates"
 
 # ── docker-compose.yml ──────────────────────────────────────────────────────
 cat > "$INSTALL_DIR/app/docker-compose.yml" <<'COMPOSE'
@@ -292,6 +292,239 @@ requests>=2.31.0
 python-telegram-bot>=20.0
 REQEOF
 
+# ── UI: requirements.txt ────────────────────────────────────────────────────
+cat > "$INSTALL_DIR/ui/requirements.txt" <<'UIREQEOF'
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+jinja2>=3.1.4
+httpx>=0.27.0
+UIREQEOF
+
+# ── UI: main.py ──────────────────────────────────────────────────────────────
+cat > "$INSTALL_DIR/ui/main.py" <<'UIMAINEOF'
+import os
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+app = FastAPI()
+templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+
+API_URL = os.getenv("DASHBOARD_API_URL", "http://web:8000").rstrip("/")
+API_TOKEN = os.getenv("DASHBOARD_API_TOKEN", "")
+
+CHECKS = [
+    ("https_redirect",            "HTTPS"),
+    ("tls_certificate_validity",  "Cert"),
+    ("dnssec",                    "DNSSEC"),
+    ("hsts",                      "HSTS"),
+    ("email_spf",                 "SPF"),
+    ("email_dmarc",               "DMARC"),
+    ("email_dkim",                "DKIM"),
+]
+
+
+def _headers() -> dict:
+    return {"Authorization": f"Token {API_TOKEN}"} if API_TOKEN else {}
+
+
+async def fetch_domains() -> tuple[list[dict], str, str | None]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{API_URL}/api/v1/report/", headers=_headers())
+        resp.raise_for_status()
+        reports = resp.json().get("results", [])
+        if not reports:
+            return [], "", None
+
+        report_id = reports[0]["id"]
+        resp = await client.get(
+            f"{API_URL}/api/v1/report/{report_id}/", headers=_headers(), timeout=60
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    scan_date = data.get("scan_date", "")
+    domains = []
+    for name, result in data.get("results", {}).items():
+        score = result.get("total_score")
+        checks_raw = result.get("checks", {})
+        check_statuses = []
+        for key, label in CHECKS:
+            status = (checks_raw.get(key) or {}).get("status", "not_tested")
+            check_statuses.append({"label": label, "status": status})
+
+        domains.append({
+            "name": name,
+            "score": round(score) if score is not None else None,
+            "checks": check_statuses,
+        })
+
+    domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
+    return domains, scan_date, None
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    error = None
+    domains: list[dict] = []
+    scan_date = ""
+    host = request.headers.get("host", "").split(":")[0] or "localhost"
+    detail_base = f"http://{host}:8000"
+
+    try:
+        domains, scan_date, error = await fetch_domains()
+    except httpx.HTTPStatusError as exc:
+        error = f"API fout {exc.response.status_code}: {exc.response.text[:200]}"
+    except Exception as exc:
+        error = f"Kan Dashboard API niet bereiken ({API_URL}): {exc}"
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "domains": domains,
+            "scan_date": scan_date,
+            "error": error,
+            "check_labels": [label for _, label in CHECKS],
+            "detail_base": detail_base,
+        },
+    )
+UIMAINEOF
+
+# ── UI: index.html ───────────────────────────────────────────────────────────
+cat > "$INSTALL_DIR/ui/templates/index.html" <<'UIHTMLEOF'
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Domain Monitor</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 2rem 1rem;
+    }
+    header {
+      max-width: 1100px; margin: 0 auto 2rem; display: flex;
+      align-items: baseline; gap: 1.5rem; flex-wrap: wrap;
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; color: #f1f5f9; }
+    .meta { font-size: 0.8rem; color: #64748b; }
+    .refresh-note { margin-left: auto; font-size: 0.75rem; color: #475569; }
+    .error {
+      max-width: 1100px; margin: 0 auto 1.5rem;
+      background: #450a0a; border: 1px solid #b91c1c;
+      border-radius: 8px; padding: 1rem 1.25rem; color: #fca5a5; font-size: 0.9rem;
+    }
+    .card {
+      max-width: 1100px; margin: 0 auto; background: #1e293b;
+      border-radius: 12px; overflow: hidden; border: 1px solid #334155;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: #0f172a; border-bottom: 1px solid #334155; }
+    th {
+      padding: 0.75rem 1rem; font-size: 0.7rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; text-align: left;
+    }
+    th.center, td.center { text-align: center; }
+    tbody tr { border-bottom: 1px solid #1e293b; transition: background 0.15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #263348; }
+    td { padding: 0.85rem 1rem; font-size: 0.9rem; vertical-align: middle; }
+    .domain-name { font-weight: 600; color: #f1f5f9; font-size: 0.95rem; }
+    .score {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 3rem; height: 1.75rem; border-radius: 6px; font-size: 0.8rem; font-weight: 700;
+    }
+    .score-green  { background: #14532d; color: #4ade80; }
+    .score-yellow { background: #713f12; color: #fbbf24; }
+    .score-red    { background: #450a0a; color: #f87171; }
+    .score-none   { background: #1e293b; color: #475569; }
+    .check {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 1.6rem; height: 1.6rem; border-radius: 50%; font-size: 0.75rem; font-weight: 700;
+    }
+    .check-passed  { background: #14532d; color: #4ade80; }
+    .check-failed  { background: #450a0a; color: #f87171; }
+    .check-warning { background: #713f12; color: #fbbf24; }
+    .check-other   { background: #1e293b; color: #475569; }
+    .btn-detail {
+      display: inline-block; padding: 0.35rem 0.7rem; background: #1e40af;
+      color: #bfdbfe; border-radius: 6px; text-decoration: none;
+      font-size: 0.75rem; font-weight: 600; transition: background 0.15s;
+    }
+    .btn-detail:hover { background: #2563eb; color: #fff; }
+    .empty { text-align: center; padding: 3rem; color: #475569; }
+    @media (max-width: 700px) { .hide-mobile { display: none; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Domain Monitor</h1>
+  {% if scan_date %}
+    <span class="meta">Laatste scan: {{ scan_date[:16] | replace("T", " ") }}</span>
+  {% endif %}
+  <span class="refresh-note">Vernieuwt elke 60s</span>
+</header>
+{% if error %}
+  <div class="error">
+    <strong>Fout:</strong> {{ error }}<br>
+    <small>Zorg dat de internet.nl Dashboard service actief is op poort 8000.</small>
+  </div>
+{% endif %}
+<div class="card">
+  {% if domains %}
+  <table>
+    <thead>
+      <tr>
+        <th>Domein</th>
+        <th class="center">Score</th>
+        {% for label in check_labels %}<th class="center hide-mobile">{{ label }}</th>{% endfor %}
+        <th class="center">Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in domains %}
+      <tr>
+        <td class="domain-name">{{ d.name }}</td>
+        <td class="center">
+          {% if d.score is not none %}
+            {% if d.score >= 80 %}<span class="score score-green">{{ d.score }}%</span>
+            {% elif d.score >= 60 %}<span class="score score-yellow">{{ d.score }}%</span>
+            {% else %}<span class="score score-red">{{ d.score }}%</span>
+            {% endif %}
+          {% else %}<span class="score score-none">–</span>{% endif %}
+        </td>
+        {% for check in d.checks %}
+        <td class="center hide-mobile">
+          {% if check.status == "passed" %}<span class="check check-passed" title="{{ check.label }}: OK">✓</span>
+          {% elif check.status == "failed" %}<span class="check check-failed" title="{{ check.label }}: Mislukt">✗</span>
+          {% elif check.status == "warning" %}<span class="check check-warning" title="{{ check.label }}: Waarschuwing">!</span>
+          {% else %}<span class="check check-other" title="{{ check.label }}: Niet getest">–</span>
+          {% endif %}
+        </td>
+        {% endfor %}
+        <td class="center"><a class="btn-detail" href="{{ detail_base }}" target="_blank">→</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif not error %}
+    <div class="empty">
+      Nog geen scanresultaten.<br>
+      <small>Voeg domeinen toe en start een scan via de <a href="{{ detail_base }}" style="color:#60a5fa">internet.nl Dashboard</a>.</small>
+    </div>
+  {% endif %}
+</div>
+</body>
+</html>
+UIHTMLEOF
+
 # ── Domeinen ────────────────────────────────────────────────────────────────
 if [[ ! -f "$INSTALL_DIR/config/domains.txt" ]]; then
     cat > "$INSTALL_DIR/config/domains.txt" <<'DOMEOF'
@@ -377,7 +610,8 @@ echo "════════════════════════�
 echo -e "${GREEN}  Domain Monitor succesvol geïnstalleerd!${NC}"
 echo "════════════════════════════════════════════════"
 echo ""
-echo "  Dashboard : http://${HOST_IP}:8000"
+echo "  Overzicht : http://${HOST_IP}:3000   ← status dashboard"
+echo "  Dashboard : http://${HOST_IP}:8000   ← internet.nl details"
 echo "  Config    : $INSTALL_DIR/app/.env"
 echo "  Domeinen  : $INSTALL_DIR/config/domains.txt"
 echo ""
