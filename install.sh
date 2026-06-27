@@ -247,7 +247,7 @@ async def index(request: Request):
             domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
     except Exception as exc:
         error = f"Fout bij laden resultaten: {exc}"
-    return templates.TemplateResponse("index.html", {"request": request, "domains": domains, "scan_date": scan_date, "error": error, "check_labels": [l for _, l in CHECKS]})
+    return templates.TemplateResponse(request, "index.html", context={"domains": domains, "scan_date": scan_date, "error": error, "check_labels": [l for _, l in CHECKS]})
 UIMAINEOF
 
 cat > "$STAGING/ui/requirements.txt" <<'UIREQEOF'

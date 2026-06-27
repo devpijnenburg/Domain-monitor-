@@ -57,8 +57,7 @@ async def index(request: Request):
     except Exception as exc:
         error = f"Fout bij laden resultaten: {exc}"
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", context={
         "domains": domains,
         "scan_date": scan_date,
         "error": error,
