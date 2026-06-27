@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
     volumes:
       - ../monitor:/app
-      - data:/data
+      - ../data:/data
     environment:
       DOMAINS_FILE: /data/domains.txt
       RESULTS_FILE: /data/results.json
@@ -48,7 +48,7 @@ services:
     working_dir: /app
     volumes:
       - ../ui:/app
-      - data:/data
+      - ../data:/data
     ports:
       - "3000:3000"
     environment:
@@ -57,9 +57,6 @@ services:
     command: >
       sh -c "pip install --quiet --break-system-packages -r /app/requirements.txt &&
              uvicorn main:app --host 0.0.0.0 --port 3000"
-
-volumes:
-  data:
 COMPOSE
 
 # ── monitor/checker.py ──────────────────────────────────────────────────────
