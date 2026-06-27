@@ -223,22 +223,30 @@ CHECKS = [("https","HTTPS"),("tls_cert","Cert"),("hsts","HSTS"),("ipv6","IPv6"),
 
 def load_results():
     p = Path(RESULTS_FILE)
-    return json.loads(p.read_text()) if p.exists() else None
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     error = None
     domains, scan_date = [], ""
-    data = load_results()
-    if data is None:
-        error = f"Nog geen scanresultaten. De monitor-service voert de eerste scan uit bij opstart."
-    else:
-        scan_date = data.get("scan_date", "")
-        for name, result in data.get("results", {}).items():
-            checks_raw = result.get("checks", {})
-            check_statuses = [{"key": k, "label": l, "status": checks_raw.get(k, {}).get("status", "not_tested"), "detail": checks_raw.get(k, {}).get("detail", "")} for k, l in CHECKS]
-            domains.append({"name": name, "score": result.get("total_score"), "checks": check_statuses})
-        domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
+    try:
+        data = load_results()
+        if data is None:
+            error = f"Nog geen scanresultaten. De monitor-service voert de eerste scan uit bij opstart."
+        else:
+            scan_date = data.get("scan_date", "")
+            for name, result in data.get("results", {}).items():
+                checks_raw = result.get("checks", {})
+                check_statuses = [{"key": k, "label": l, "status": checks_raw.get(k, {}).get("status", "not_tested"), "detail": checks_raw.get(k, {}).get("detail", "")} for k, l in CHECKS]
+                domains.append({"name": name, "score": result.get("total_score"), "checks": check_statuses})
+            domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
+    except Exception as exc:
+        error = f"Fout bij laden resultaten: {exc}"
     return templates.TemplateResponse("index.html", {"request": request, "domains": domains, "scan_date": scan_date, "error": error, "check_labels": [l for _, l in CHECKS]})
 UIMAINEOF
 
