@@ -53,6 +53,7 @@ services:
       - "3000:3000"
     environment:
       RESULTS_FILE: /data/results.json
+      DOMAINS_FILE: /data/domains.txt
     command: >
       sh -c "pip install --quiet --break-system-packages -r /app/requirements.txt &&
              uvicorn main:app --host 0.0.0.0 --port 3000"
@@ -74,6 +75,7 @@ import checkdmarc
 
 DOMAINS_FILE = os.getenv("DOMAINS_FILE", "/data/domains.txt")
 RESULTS_FILE = os.getenv("RESULTS_FILE", "/data/results.json")
+TRIGGER_FILE = "/data/scan.trigger"
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_HOURS", "24")) * 3600
 
 CHECK_WEIGHTS = {"https": 20, "tls_cert": 20, "hsts": 10, "ipv6": 10, "dnssec": 15, "spf": 10, "dmarc": 15}
@@ -195,11 +197,23 @@ def run_scan():
     Path(RESULTS_FILE).write_text(json.dumps(output, indent=2))
     print(f"Resultaten opgeslagen: {RESULTS_FILE}", flush=True)
 
+def wait_for_next_scan(seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if Path(TRIGGER_FILE).exists():
+            try:
+                Path(TRIGGER_FILE).unlink()
+            except OSError:
+                pass
+            print("Handmatige scan getriggerd.", flush=True)
+            return
+        time.sleep(10)
+
 if __name__ == "__main__":
     while True:
         run_scan()
-        print(f"Volgende scan over {SCAN_INTERVAL // 3600} uur...", flush=True)
-        time.sleep(SCAN_INTERVAL)
+        print(f"Volgende scan over {SCAN_INTERVAL // 3600} uur.", flush=True)
+        wait_for_next_scan(SCAN_INTERVAL)
 CHECKEREOF
 
 cat > "$STAGING/monitor/requirements.txt" <<'MONREQEOF'
@@ -213,14 +227,22 @@ cat > "$STAGING/ui/main.py" <<'UIMAINEOF'
 import json, os
 from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 app = FastAPI()
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 RESULTS_FILE = os.getenv("RESULTS_FILE", "/data/results.json")
+DOMAINS_FILE = os.getenv("DOMAINS_FILE", "/data/domains.txt")
+TRIGGER_FILE = "/data/scan.trigger"
 
 CHECKS = [("https","HTTPS"),("tls_cert","Cert"),("hsts","HSTS"),("ipv6","IPv6"),("dnssec","DNSSEC"),("spf","SPF"),("dmarc","DMARC")]
+
+def load_domains():
+    p = Path(DOMAINS_FILE)
+    if not p.exists():
+        return []
+    return [l.strip() for l in p.read_text().splitlines() if l.strip() and not l.startswith("#")]
 
 def load_results():
     p = Path(RESULTS_FILE)
@@ -236,19 +258,36 @@ async def index(request: Request):
     error = None
     domains, scan_date = [], ""
     try:
+        configured = load_domains()
         data = load_results()
-        if data is None:
-            error = f"Nog geen scanresultaten. De monitor-service voert de eerste scan uit bij opstart."
-        else:
-            scan_date = data.get("scan_date", "")
-            for name, result in data.get("results", {}).items():
+        results = data.get("results", {}) if data else {}
+        scan_date = data.get("scan_date", "") if data else ""
+        seen = set()
+        for name in configured:
+            seen.add(name)
+            result = results.get(name, {})
+            checks_raw = result.get("checks", {})
+            check_statuses = [{"key": k, "label": l, "status": checks_raw.get(k, {}).get("status", "pending"), "detail": checks_raw.get(k, {}).get("detail", "")} for k, l in CHECKS]
+            domains.append({"name": name, "score": result.get("total_score"), "checks": check_statuses})
+        for name, result in results.items():
+            if name not in seen:
                 checks_raw = result.get("checks", {})
-                check_statuses = [{"key": k, "label": l, "status": checks_raw.get(k, {}).get("status", "not_tested"), "detail": checks_raw.get(k, {}).get("detail", "")} for k, l in CHECKS]
+                check_statuses = [{"key": k, "label": l, "status": checks_raw.get(k, {}).get("status", "pending"), "detail": checks_raw.get(k, {}).get("detail", "")} for k, l in CHECKS]
                 domains.append({"name": name, "score": result.get("total_score"), "checks": check_statuses})
-            domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
+        domains.sort(key=lambda d: (d["score"] is None, -(d["score"] or 0)))
+        if not configured and not results:
+            error = f"Geen domeinen geconfigureerd. Voeg domeinen toe aan {DOMAINS_FILE}."
     except Exception as exc:
-        error = f"Fout bij laden resultaten: {exc}"
-    return templates.TemplateResponse(request, "index.html", context={"domains": domains, "scan_date": scan_date, "error": error, "check_labels": [l for _, l in CHECKS]})
+        error = f"Fout bij laden: {exc}"
+    return templates.TemplateResponse(request, "index.html", context={"domains": domains, "scan_date": scan_date, "error": error, "check_labels": [l for _, l in CHECKS], "trigger_pending": Path(TRIGGER_FILE).exists()})
+
+@app.post("/scan")
+async def trigger_scan():
+    try:
+        Path(TRIGGER_FILE).touch()
+        return JSONResponse({"status": "ok"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 UIMAINEOF
 
 cat > "$STAGING/ui/requirements.txt" <<'UIREQEOF'
@@ -266,10 +305,15 @@ cat > "$STAGING/ui/templates/index.html" <<'UIHTMLEOF'
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:2rem 1rem}
-    header{max-width:1200px;margin:0 auto 2rem;display:flex;align-items:baseline;gap:1.5rem;flex-wrap:wrap}
+    header{max-width:1200px;margin:0 auto 2rem;display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap}
     h1{font-size:1.6rem;font-weight:700;color:#f1f5f9}
     .meta{font-size:.8rem;color:#64748b}
-    .refresh-note{margin-left:auto;font-size:.75rem;color:#475569}
+    .spacer{flex:1}
+    .refresh-note{font-size:.75rem;color:#475569}
+    .scan-btn{background:#1e40af;color:#bfdbfe;border:1px solid #1d4ed8;border-radius:6px;padding:.4rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer;transition:background .15s}
+    .scan-btn:hover{background:#1d4ed8}
+    .scan-btn:disabled{background:#1e293b;color:#475569;border-color:#334155;cursor:default}
+    .scan-btn.scanning{background:#713f12;color:#fbbf24;border-color:#92400e}
     .error{max-width:1200px;margin:0 auto 1.5rem;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1rem 1.25rem;color:#94a3b8;font-size:.9rem}
     .card{max-width:1200px;margin:0 auto;background:#1e293b;border-radius:12px;overflow:hidden;border:1px solid #334155}
     table{width:100%;border-collapse:collapse}
@@ -284,7 +328,7 @@ cat > "$STAGING/ui/templates/index.html" <<'UIHTMLEOF'
     .sc{display:inline-flex;align-items:center;justify-content:center;width:3.2rem;height:1.75rem;border-radius:6px;font-size:.8rem;font-weight:700}
     .sg{background:#14532d;color:#4ade80}.sy{background:#713f12;color:#fbbf24}.sr{background:#450a0a;color:#f87171}.sn{background:#1e293b;color:#475569;border:1px solid #334155}
     .ck{display:inline-flex;align-items:center;justify-content:center;width:1.6rem;height:1.6rem;border-radius:50%;font-size:.75rem;font-weight:700;cursor:default}
-    .cp{background:#14532d;color:#4ade80}.cf{background:#450a0a;color:#f87171}.cw{background:#713f12;color:#fbbf24}.co{background:#1e293b;color:#475569;border:1px solid #334155}
+    .cp{background:#14532d;color:#4ade80}.cf{background:#450a0a;color:#f87171}.cw{background:#713f12;color:#fbbf24}.cn{background:#1e293b;color:#475569;border:1px solid #334155}
     .empty{text-align:center;padding:3rem;color:#475569}
     @media(max-width:750px){.hm{display:none}}
   </style>
@@ -293,7 +337,11 @@ cat > "$STAGING/ui/templates/index.html" <<'UIHTMLEOF'
 <header>
   <h1>Domain Monitor</h1>
   {% if scan_date %}<span class="meta">Laatste scan: {{ scan_date[:16]|replace("T"," ") }} UTC</span>{% endif %}
+  <span class="spacer"></span>
   <span class="refresh-note">Vernieuwt elke 60s</span>
+  <button class="scan-btn{% if trigger_pending %} scanning{% endif %}" id="scan-btn" onclick="triggerScan(this)" {% if trigger_pending %}disabled{% endif %}>
+    {% if trigger_pending %}⏳ Scan in wachtrij…{% else %}↻ Scan starten{% endif %}
+  </button>
 </header>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 <div class="card">
@@ -303,13 +351,16 @@ cat > "$STAGING/ui/templates/index.html" <<'UIHTMLEOF'
     <tbody>{% for d in domains %}<tr>
       <td class="dn">{{ d.name }}</td>
       <td class="c">{% if d.score is not none %}{% if d.score>=80 %}<span class="sc sg">{{ d.score }}%</span>{% elif d.score>=60 %}<span class="sc sy">{{ d.score }}%</span>{% else %}<span class="sc sr">{{ d.score }}%</span>{% endif %}{% else %}<span class="sc sn">–</span>{% endif %}</td>
-      {% for ch in d.checks %}<td class="c hm">{% if ch.status=="passed" %}<span class="ck cp" title="{{ ch.label }}: {{ ch.detail }}">✓</span>{% elif ch.status=="failed" %}<span class="ck cf" title="{{ ch.label }}: {{ ch.detail }}">✗</span>{% elif ch.status=="warning" %}<span class="ck cw" title="{{ ch.label }}: {{ ch.detail }}">!</span>{% else %}<span class="ck co" title="{{ ch.label }}: niet getest">–</span>{% endif %}</td>{% endfor %}
+      {% for ch in d.checks %}<td class="c hm">{% if ch.status=="passed" %}<span class="ck cp" title="{{ ch.label }}: {{ ch.detail }}">✓</span>{% elif ch.status=="failed" %}<span class="ck cf" title="{{ ch.label }}: {{ ch.detail }}">✗</span>{% elif ch.status=="warning" %}<span class="ck cw" title="{{ ch.label }}: {{ ch.detail }}">!</span>{% elif ch.status=="pending" %}<span class="ck cn" title="{{ ch.label }}: nog niet gescand">–</span>{% else %}<span class="ck cn" title="{{ ch.label }}: niet getest">–</span>{% endif %}</td>{% endfor %}
     </tr>{% endfor %}</tbody>
   </table>
   {% elif not error %}
-  <div class="empty">Wachten op eerste scan...<br><small>De monitor voert elke 24 uur een scan uit.</small></div>
+  <div class="empty">Geen domeinen geconfigureerd.<br><small>Voeg domeinen toe aan <code>/data/domains.txt</code> en klik op "Scan starten".</small></div>
   {% endif %}
 </div>
+<script>
+function triggerScan(btn){btn.disabled=true;btn.textContent='⏳ Scan in wachtrij…';btn.classList.add('scanning');fetch('/scan',{method:'POST'}).then(()=>setTimeout(()=>location.reload(),1000)).catch(()=>{btn.disabled=false;btn.textContent='↻ Scan starten';btn.classList.remove('scanning')});}
+</script>
 </body></html>
 UIHTMLEOF
 

@@ -8,10 +8,15 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 2rem 1rem; }
-    header { max-width: 1200px; margin: 0 auto 2rem; display: flex; align-items: baseline; gap: 1.5rem; flex-wrap: wrap; }
+    header { max-width: 1200px; margin: 0 auto 2rem; display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
     h1 { font-size: 1.6rem; font-weight: 700; color: #f1f5f9; }
     .meta { font-size: 0.8rem; color: #64748b; }
-    .refresh-note { margin-left: auto; font-size: 0.75rem; color: #475569; }
+    .refresh-note { font-size: 0.75rem; color: #475569; }
+    .spacer { flex: 1; }
+    .scan-btn { background: #1e40af; color: #bfdbfe; border: 1px solid #1d4ed8; border-radius: 6px; padding: 0.4rem 0.9rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: background 0.15s; }
+    .scan-btn:hover { background: #1d4ed8; }
+    .scan-btn:disabled { background: #1e293b; color: #475569; border-color: #334155; cursor: default; }
+    .scan-btn.scanning { background: #713f12; color: #fbbf24; border-color: #92400e; }
     .error { max-width: 1200px; margin: 0 auto 1.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1rem 1.25rem; color: #94a3b8; font-size: 0.9rem; }
     .card { max-width: 1200px; margin: 0 auto; background: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; }
     table { width: 100%; border-collapse: collapse; }
@@ -32,6 +37,7 @@
     .check-passed  { background: #14532d; color: #4ade80; }
     .check-failed  { background: #450a0a; color: #f87171; }
     .check-warning { background: #713f12; color: #fbbf24; }
+    .check-pending { background: #1e293b; color: #475569; border: 1px solid #334155; }
     .check-other   { background: #1e293b; color: #475569; border: 1px solid #334155; }
     .empty { text-align: center; padding: 3rem; color: #475569; }
     @media (max-width: 750px) { .hide-mobile { display: none; } }
@@ -41,7 +47,13 @@
 <header>
   <h1>Domain Monitor</h1>
   {% if scan_date %}<span class="meta">Laatste scan: {{ scan_date[:16] | replace("T", " ") }} UTC</span>{% endif %}
+  <span class="spacer"></span>
   <span class="refresh-note">Vernieuwt elke 60s</span>
+  <button class="scan-btn{% if trigger_pending %} scanning{% endif %}" id="scan-btn"
+          onclick="triggerScan(this)"
+          {% if trigger_pending %}disabled{% endif %}>
+    {% if trigger_pending %}⏳ Scan in wachtrij…{% else %}↻ Scan starten{% endif %}
+  </button>
 </header>
 
 {% if error %}
@@ -75,6 +87,8 @@
             <span class="check check-failed" title="{{ check.label }}: {{ check.detail }}">✗</span>
           {% elif check.status == "warning" %}
             <span class="check check-warning" title="{{ check.label }}: {{ check.detail }}">!</span>
+          {% elif check.status == "pending" %}
+            <span class="check check-pending" title="{{ check.label }}: nog niet gescand">–</span>
           {% else %}
             <span class="check check-other" title="{{ check.label }}: niet getest">–</span>
           {% endif %}
@@ -85,8 +99,22 @@
     </tbody>
   </table>
   {% elif not error %}
-  <div class="empty">Wachten op eerste scan...<br><small>De monitor-service voert elke 24 uur een scan uit.</small></div>
+  <div class="empty">
+    Geen domeinen geconfigureerd.<br>
+    <small>Voeg domeinen toe aan <code>/data/domains.txt</code> (één per regel) en klik op "Scan starten".</small>
+  </div>
   {% endif %}
 </div>
+
+<script>
+function triggerScan(btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳ Scan in wachtrij…';
+  btn.classList.add('scanning');
+  fetch('/scan', { method: 'POST' })
+    .then(() => setTimeout(() => location.reload(), 1000))
+    .catch(() => { btn.disabled = false; btn.textContent = '↻ Scan starten'; btn.classList.remove('scanning'); });
+}
+</script>
 </body>
 </html>
