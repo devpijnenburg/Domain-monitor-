@@ -45,6 +45,7 @@ services:
   ui:
     image: python:3.12-slim
     restart: unless-stopped
+    working_dir: /app
     volumes:
       - ../ui:/app
       - data:/data
