@@ -5,10 +5,14 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/domain-monitor"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[✓]${NC} $*"; }
+info() { echo -e "${BLUE}[…]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 die()  { echo -e "${RED}[✗]${NC} $*" >&2; exit 1; }
+
+# tr | head geeft SIGPIPE — gebruik subshell zonder pipefail voor willekeurige strings
+randstr() { local n=$1 c=${2:-A-Za-z0-9}; (set +o pipefail; tr -dc "$c" </dev/urandom | head -c "$n"); }
 
 [[ $EUID -ne 0 ]] && die "Voer dit script uit als root."
 
@@ -483,8 +487,8 @@ log "Configuratie invullen..."
 echo ""
 
 read -rp "Database wachtwoord (Enter = willekeurig): " DB_PASS
-[[ -z "$DB_PASS" ]] && DB_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
-SECRET_KEY=$(tr -dc 'A-Za-z0-9!@#%^&*' </dev/urandom | head -c 60)
+[[ -z "$DB_PASS" ]] && DB_PASS=$(randstr 32)
+SECRET_KEY=$(randstr 60 'A-Za-z0-9@#%^&')
 
 echo ""
 echo "─── SMTP e-mail alerts (leeg = uitgeschakeld) ───────────────────"
@@ -547,24 +551,33 @@ CRON_LINE='0 8 * * * ${INSTALL_DIR}/alert/cron.sh >> /var/log/domain-monitor-ale
 # ════════════════════════════════════════════════════════════════════════════
 
 proxmox_deploy() {
-    # Template zoeken en downloaden
+    echo ""
+    echo "════════════════════════════════════════════════"
+    info "Stap 1/5 — LXC template voorbereiden"
+    echo "════════════════════════════════════════════════"
+
     TEMPLATE=$(pveam list local 2>/dev/null | awk '/debian-12/{print $1; exit}')
     if [[ -z "$TEMPLATE" ]]; then
-        log "Debian 12 template downloaden..."
-        pveam update &>/dev/null
+        info "Debian 12 template lijst ophalen..."
+        pveam update
         TMPL_NAME=$(pveam available --section system 2>/dev/null | awk '/debian-12-standard/{print $2; exit}')
         [[ -z "$TMPL_NAME" ]] && die "Geen Debian 12 template gevonden. Voer 'pveam update' uit en probeer opnieuw."
+        info "Template downloaden: $TMPL_NAME"
         pveam download local "$TMPL_NAME"
         TEMPLATE="local:vztmpl/${TMPL_NAME}"
     fi
     log "Template: $TEMPLATE"
 
-    # LXC aanmaken of bestaande hergebruiken
+    echo ""
+    echo "════════════════════════════════════════════════"
+    info "Stap 2/5 — LXC container aanmaken"
+    echo "════════════════════════════════════════════════"
+
     if pct status "$VMID" &>/dev/null; then
         warn "LXC $VMID bestaat al — applicatie wordt bijgewerkt."
         pct start "$VMID" 2>/dev/null || true
     else
-        log "LXC $VMID aanmaken..."
+        info "LXC $VMID aanmaken (${LXC_NAME}, ${LXC_MEM}MB RAM)..."
         pct create "$VMID" "$TEMPLATE" \
             --hostname "$LXC_NAME" \
             --cores 2 \
@@ -574,32 +587,45 @@ proxmox_deploy() {
             --features "nesting=1" \
             --unprivileged 0 \
             --onboot 1
+        info "LXC starten..."
         pct start "$VMID"
+        log "LXC $VMID gestart."
     fi
 
-    # Wachten op netwerk
-    log "Wachten op netwerk in LXC $VMID..."
+    info "Wachten op netwerk in LXC $VMID..."
     for i in $(seq 1 30); do
-        if pct exec "$VMID" -- ip -4 addr show eth0 2>/dev/null | grep -q "inet "; then break; fi
+        if pct exec "$VMID" -- ip -4 addr show eth0 2>/dev/null | grep -q "inet "; then
+            log "Netwerk beschikbaar."; break
+        fi
+        echo -n "."
         sleep 2
     done
+    echo ""
 
-    # Docker installeren in LXC
+    echo ""
+    echo "════════════════════════════════════════════════"
+    info "Stap 3/5 — Docker installeren in LXC"
+    echo "════════════════════════════════════════════════"
+
     if ! pct exec "$VMID" -- command -v docker &>/dev/null; then
-        log "Docker installeren in LXC $VMID..."
+        info "Docker installeren via get.docker.com (dit duurt ~1-2 minuten)..."
         pct exec "$VMID" -- bash -c "$install_docker_script"
+        log "Docker geïnstalleerd."
     else
         log "Docker al aanwezig in LXC $VMID."
         pct exec "$VMID" -- bash -c "apt-get install -y -qq python3 python3-pip cron && systemctl enable --now cron"
     fi
 
-    # Bestanden naar LXC kopiëren
-    log "Bestanden kopiëren naar LXC $VMID..."
+    echo ""
+    echo "════════════════════════════════════════════════"
+    info "Stap 4/5 — Bestanden kopiëren naar LXC"
+    echo "════════════════════════════════════════════════"
+
     pct exec "$VMID" -- mkdir -p \
         "${INSTALL_DIR}/app" "${INSTALL_DIR}/alert" \
         "${INSTALL_DIR}/config" "${INSTALL_DIR}/ui/templates"
 
-    push() { pct push "$VMID" "$1" "$2"; }
+    push() { info "  → $2"; pct push "$VMID" "$1" "$2"; }
     push "$STAGING/app/docker-compose.yml"        "${INSTALL_DIR}/app/docker-compose.yml"
     push "$STAGING/app/.env"                      "${INSTALL_DIR}/app/.env"
     push "$STAGING/alert/alert.py"                "${INSTALL_DIR}/alert/alert.py"
@@ -611,10 +637,16 @@ proxmox_deploy() {
     push "$STAGING/config/domains.txt"            "${INSTALL_DIR}/config/domains.txt"
     pct exec "$VMID" -- chmod 600 "${INSTALL_DIR}/app/.env"
     pct exec "$VMID" -- chmod +x  "${INSTALL_DIR}/alert/cron.sh"
+    log "Bestanden gekopieerd."
 
-    # Stack starten in LXC
-    log "Stack starten in LXC $VMID..."
+    echo ""
+    echo "════════════════════════════════════════════════"
+    info "Stap 5/5 — Docker Compose stack starten"
+    echo "════════════════════════════════════════════════"
+
+    info "Images downloaden en containers starten (dit duurt een paar minuten)..."
     pct exec "$VMID" -- bash -c "$start_stack_script"
+    log "Stack gestart."
 
     LXC_IP=$(pct exec "$VMID" -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     print_summary "$LXC_IP" "$VMID"
