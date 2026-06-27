@@ -1,41 +1,29 @@
 # Domain Monitor
 
-Self-hosted domain monitoring tool vergelijkbaar met [internet.nl](https://internet.nl). Controleert TLS, DNSSEC, SPF, DKIM, DMARC, HSTS, IPv6 en meer. Alerteert via e-mail en/of Telegram bij verslechtering van scores.
+Self-hosted domain monitoring vergelijkbaar met [internet.nl](https://internet.nl). Controleert TLS, DNSSEC, SPF, DKIM, DMARC, HSTS, IPv6 en meer. Alerteert via e-mail en/of Telegram bij verslechtering van scores.
 
 ## Installatie
 
-Voer het installatiescript uit op een Ubuntu 22.04 / Debian 12 host (LXC, VM of bare metal):
+Voer uit op Ubuntu 22.04 / Debian 12 (LXC, VM of bare metal) als root:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/devpijnenburg/Domain-monitor-/main/install.sh)"
 ```
 
-Het script:
-- Installeert Docker automatisch indien afwezig
-- Vraagt om SMTP en/of Telegram configuratie
-- Start de internet.nl Dashboard stack via Docker Compose
-- Stelt een dagelijkse cron in voor degradation-alerts
+Het script installeert Docker automatisch indien afwezig, vraagt om SMTP en/of Telegram configuratie, en start de volledige stack.
 
 ## Na installatie
 
-**Status overzicht (eigen dashboard):**
-```
-http://<host-ip>:3000
-```
-
-**internet.nl detail dashboard:**
-```
-http://<host-ip>:8000
-```
+| URL | Wat |
+|---|---|
+| `http://<host>:3000` | Status dashboard — alle domeinen met score + check-iconen |
+| `http://<host>:8000` | internet.nl Dashboard — volledige details en scanbeheer |
 
 **Admin account aanmaken:**
 ```bash
 cd /opt/domain-monitor/app
 docker compose exec web python manage.py createsuperuser
 ```
-
-**Domeinen toevoegen:**
-Bewerk `/opt/domain-monitor/config/domains.txt` (één domein per regel).
 
 **Alert handmatig testen:**
 ```bash
@@ -44,18 +32,23 @@ python3 /opt/domain-monitor/alert/alert.py
 
 ## Configuratie
 
-Na installatie staat de configuratie in `/opt/domain-monitor/app/.env`. Bewerk dit bestand om SMTP of Telegram aan/uit te zetten.
+Alle instellingen staan in `/opt/domain-monitor/app/.env`. Bewerk dit bestand om SMTP of Telegram aan/uit te zetten.
 
 ## Stack
 
-- **internet.nl Dashboard** — officiële open-source implementatie van internet.nl checks
-- **PostgreSQL + Redis + Celery** — database, cache, taakwachtrij
-- **alert.py** — vergelijkt scores dagelijks, alerteert bij verslechtering ≥ 5% of falende kritieke check
+| Service | Beschrijving | Poort |
+|---|---|---|
+| **internet.nl Dashboard** | Officiële open-source implementatie van internet.nl checks | 8000 |
+| **Status dashboard** | Eigen overzichtspagina — scores (groen/geel/rood) + check-iconen per domein | 3000 |
+| **PostgreSQL 15** | Opslag van scanresultaten | — |
+| **Redis 7** | Cache en taakwachtrij | — |
+| **Celery worker + beat** | Achtergrondscans en scheduler | — |
+| **alert.py** | Dagelijkse cron — alerteert bij score-daling ≥ 5% of kritieke check-falen | — |
 
 ## Updates
 
+Voer het installatiescript opnieuw uit — het is idempotent en overschrijft alleen de applicatiebestanden:
+
 ```bash
-cd /pad/naar/domain-monitor-
-git pull
-sudo bash install.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/devpijnenburg/Domain-monitor-/main/install.sh)"
 ```
